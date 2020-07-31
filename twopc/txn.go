@@ -2,7 +2,7 @@ package twopc
 
 import (
 	"crypto/rand"
-	"distributed-system/util"
+	"d-s-zl/util"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -149,46 +149,43 @@ type Txn struct {
 // It's mutually exclusive with commitTxn.
 func (txn *Txn) abortTxn() {
 	// TODO
-	var wc sync.WaitGroup
-	for i := 0; i < len(txn.parts); i++ {
-		wc.Add(1)
-		txnPart := txn.parts[i]
-
-		// Abort all the parts of the txn.
-		go func(txnPart *TxnPart) {
-			// Set states of all parts of txn to StateAborted.
-			atomic.StoreInt32(&txnPart.state, StateTxnPartAborted)
-			args := AbortArgs{TxnPartID: txnPart.ID}
+	var wg sync.WaitGroup
+	for _, tp := range txn.parts {
+		wg.Add(1)
+		go func(tp *TxnPart) {
+			atomic.StoreInt32(&tp.state, StateTxnPartAborted)
+			args := &AbortArgs{TxnPartID: tp.ID}
 			var reply AbortReply
-			var ok = false
+			ok := false
 			for !ok {
-				ok = util.RPCPoolArrayCall(txn.ctr.pa, txnPart.Shard, "Participant.Abort", args, &reply)
+				ok = util.RPCPoolArrayCall(txn.ctr.pa, tp.Shard, "Participant.Abort", args, &reply)
 			}
-			wc.Done()
-		}(txnPart)
+			wg.Done()
+		}(tp)
 	}
-	wc.Wait()
+	wg.Wait()
 	atomic.StoreInt32(&txn.state, StateTxnAborted)
 }
 
-// Invoked in the following conditions:
-// 1. One part of Txn informed StateAborted.
-// 2. Not all parts of Txn get prepared in a timeout period.
-// 3. Txn actively aborts.
-//
-// txnPartIdx < 0 in 2 and 3 conditions.
+// Invoked when one part of Txn informed StateAborted.
+// txnPartIdx should >= 0.
 func (txn *Txn) abortTxnPart(partIdx int, errCode int) {
 	// TODO
-	if partIdx >= 0 {
-		txnPart := txn.parts[partIdx]
-		txnPart.errCode = errCode
-		atomic.StoreInt32(&txnPart.state, StateTxnPartAborted)
-		// !!! OR operator
-		txn.errCode = txn.errCode | txnPart.errCode
-		// fmt.Println("abortTxnPart", txn.errCode)
-	}
+	txnPart := txn.parts[partIdx]
+	txnPart.errCode = errCode
+	atomic.StoreInt32(&txnPart.state, StateTxnPartAborted)
+	// !!! OR operator
+	txn.errCode = txn.errCode | txnPart.errCode
+	// fmt.Println("abortTxnPart", txn.errCode)
+	txn.checkIfAbortTxn()
+}
 
-	// Make sure abortTxn will be triggered only once.
+// Invoked in the following conditions:
+// 1. in (*Txn).abortTxnPart()
+// 2. Not all parts of Txn get prepared in a timeout period.
+// 3. Txn actively aborts.
+func (txn *Txn) checkIfAbortTxn() {
+	// Make sure abortTxn() will be triggered only once.
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	state := atomic.LoadInt32(&txn.state)
@@ -230,24 +227,21 @@ func (txn *Txn) prepareTxnPart(partIdx int, errCode int) {
 // It's mutually exclusive with abortTxn.
 func (txn *Txn) commitTxn() {
 	// TODO
-	var wc sync.WaitGroup
-	for i := 0; i < len(txn.parts); i++ {
-		wc.Add(1)
-		txnPart := txn.parts[i]
-		// Commit all the parts of the txn.
-		go func(txnPart *TxnPart) {
-			// Set states of all parts of txn to StateCommitted.
-			atomic.StoreInt32(&txnPart.state, StateTxnPartCommitted)
-			args := CommitArgs{TxnPartID: txnPart.ID}
+	var wg sync.WaitGroup
+	for _, tp := range txn.parts {
+		wg.Add(1)
+		go func(tp *TxnPart) {
+			atomic.StoreInt32(&tp.state, StateTxnPartCommitted)
+			args := &CommitArgs{TxnPartID: tp.ID}
 			var reply CommitReply
-			var ok = false
+			ok := false
 			for !ok {
-				ok = util.RPCPoolArrayCall(txn.ctr.pa, txnPart.Shard, "Participant.Commit", args, &reply)
+				ok = util.RPCPoolArrayCall(txn.ctr.pa, tp.Shard, "Participant.Commit", args, &reply)
 			}
-			wc.Done()
-		}(txnPart)
+			wg.Done()
+		}(tp)
 	}
-	wc.Wait()
+	wg.Wait()
 	atomic.StoreInt32(&txn.state, StateTxnCommitted)
 }
 
@@ -264,16 +258,15 @@ func (txn *Txn) waitAllPartsPrepared() {
 	case <-time.Tick(time.Millisecond * time.Duration(txn.timeoutMs)):
 		{
 			fmt.Println("Abort because of timeout", time.Millisecond*time.Duration(txn.timeoutMs))
-			txn.abortTxnPart(-1, 0)
+			txn.checkIfAbortTxn()
 			txn.errCode = ErrTxnTimeout
 		}
 	case <-txn.done:
-		{
-			return
-		}
+		return
 	}
 }
 
+// create txn id
 func nrand() string {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
@@ -320,23 +313,22 @@ func (txn *Txn) BroadcastTxnPart(callName string) {
 func (txn *Txn) Start(initArgs interface{}) {
 	// TODO
 	ret, errCode := txn.initFunc(initArgs)
+	if errCode == 0 {
+		atomic.StoreInt32(&txn.state, StateTxnInit)
+		for _, tp := range txn.parts {
+			go func(tp *TxnPart) {
+				if ret != nil {
+					tp.InitRet = ret
+				}
+				var reply struct{}
+				util.RPCPoolArrayCall(txn.ctr.pa, tp.Shard, "Participant.SubmitTxnPart", tp, &reply)
+			}(tp)
 
-	// stop the txn
-	if errCode != 0 {
-		txn.errCode = errCode
+		}
+	} else {
 		atomic.StoreInt32(&txn.state, StateTxnAborted)
+		txn.errCode = errCode
 		return
-	}
-	atomic.StoreInt32(&txn.state, StateTxnInit)
-
-	for _, txnPart := range txn.parts {
-		go func(txnPart *TxnPart) {
-			if ret != nil {
-				txnPart.InitRet = ret
-			}
-			// fmt.Println("here", *txnPart)
-			util.RPCPoolArrayCall(txn.ctr.pa, txnPart.Shard, "Participant.SubmitTxnPart", txnPart, &struct{}{})
-		}(txnPart)
 	}
 }
 

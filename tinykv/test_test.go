@@ -38,7 +38,7 @@ func TestConcurrent(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 	fmt.Printf("Test: Concurrent kvstore R/W ...\n")
 
-	srvAddr := "localhost:9090"
+	srvAddr := "localhost:9092"
 	ts := NewKVStoreService("tcp", srvAddr)
 	ts.Serve()
 	defer ts.Kill()

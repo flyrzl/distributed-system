@@ -63,7 +63,7 @@ Consensus on Transaction Commit. https://www.microsoft.com/en-us/research/public
 package twopc
 
 import (
-	"distributed-system/util"
+	"d-s-zl/util"
 	"fmt"
 	"log"
 	"math"
@@ -108,6 +108,7 @@ func NewCoordinator(network, coord string, ppts []string) *Coordinator {
 	ctr.slots = make([]bool, len(ppts))
 	for i := 0; i < len(ppts); i++ {
 		addr := ppts[i]
+		// resource is a rpc.Client
 		news[i] = func() util.Resource {
 			return util.DialServer(network, addr)
 		}
@@ -161,11 +162,17 @@ func (ctr *Coordinator) RegisterService(service interface{}) {
 func (ctr *Coordinator) NewTxn(initFunc TxnInitFunc,
 	keyHashFunc KeyHashFunc, timeoutMs int64) *Txn {
 	// TODO
-	txn := &Txn{ID: nrand(), ctr: ctr,
-		partsNum: 0, parts: nil, preparedCnt: 0,
-		done: make(chan struct{}, 1), state: StateTxnCreated,
-		timeoutMs: timeoutMs, initFunc: initFunc,
+	txn := &Txn{
+		ID:          nrand(),
+		ctr:         ctr,
+		partsNum:    0,
+		parts:       nil,
+		preparedCnt: 0,
+		done:        make(chan struct{}, 1),
+		state:       StateTxnCreated,
+		initFunc:    initFunc,
 		keyHashFunc: keyHashFunc,
+		timeoutMs:   timeoutMs,
 	}
 	ctr.txnsMu.Lock()
 	defer ctr.txnsMu.Unlock()
@@ -205,7 +212,7 @@ func (ctr *Coordinator) SyncTxnEnd(txnID *string, reply *TxnState) error {
 // transaction in some conditions.
 func (ctr *Coordinator) Abort(txnID string) {
 	txn := ctr.txnByID(txnID)
-	txn.abortTxnPart(-1, 0)
+	txn.checkIfAbortTxn()
 	txn.errCode = ErrTxnUserAbort
 }
 
@@ -217,12 +224,12 @@ func (ctr *Coordinator) InformPrepared(args *PreparedArgs, reply *PreparedReply)
 	// TODO
 	txn := ctr.txnByID(args.TxnID)
 	txn.prepareTxnPart(args.TxnPartIdx, args.ErrCode)
-
-	// Only the 1st prepared will trigger the WaitAllPrepared().
 	swapped := atomic.CompareAndSwapInt32(&txn.state, StateTxnInit, StateTxnPreparing)
 	if swapped {
+		// first prepared msg
 		go txn.waitAllPartsPrepared()
 	}
+	// ignore reply
 	return nil
 }
 
@@ -232,6 +239,10 @@ func (ctr *Coordinator) InformAborted(args *AbortedArgs, reply *AbortedReply) er
 	// TODO
 	txn := ctr.txnByID(args.TxnID)
 	txn.abortTxnPart(args.TxnPartIdx, args.ErrCode)
+
+	// not set txnstate to StateAborted
+	// why not invoke txn.abortTxn() directly?
+	// ignore reply
 	return nil
 }
 

@@ -30,13 +30,12 @@ const (
 	WriteBuffInitSize     = 256
 )
 
-// Request is the Http Request. The format is below.
-//  Request = Request-Line
-//             *(( general-header | request-header | entity-header ) CRLF)
-//            CRLF
-//            [message-body]
-//  Request-Line = Method SP Request-URI SP HTTP-Version CRLF
-//  Header = Key: Value CRLF
+// Request = Request-Line
+//            *(( general-header | request-header | entity-header ) CRLF)
+//           CRLF
+//           [message-body]
+// Request-Line = Method SP Request-URI SP HTTP-Version CRLF
+// Header = Key: Value CRLF
 type Request struct {
 	Method string
 	URL    *url.URL
@@ -48,13 +47,14 @@ type Request struct {
 	Body          io.Reader
 }
 
-// Response is the Http Response. The format is below.
-//  Response = Status-Line
-//            *(( general-header | response-header | entity-header ) CRLF)
-//            CRLF
-//            [ message-body ]
-//  Status-Line = HTTP-Version SP Status-Code SP Reason-Phrase CRLF
-//  Header = Key: Value CRLF
+// Response = Status-Line
+//           *(( general-header | response-header | entity-header ) CRLF)
+//           CRLF
+//           [ message-body ]
+// Status-Line = HTTP-Version SP Status-Code SP Reason-Phrase CRLF
+// Header = Key: Value CRLF
+//
+// Request for http request.
 type Response struct {
 	Status     string
 	StatusCode int
@@ -94,10 +94,10 @@ func (reader *ResponseReader) Read(p []byte) (n int, err error) {
 // implements io.Closer interface.
 func (reader *ResponseReader) Close() {
 	// Put back the connection for the possible future use.
-	reader.c.connPools.Put(reader.host, reader.conn.(io.ReadWriteCloser))
+	reader.c.putConn(reader.conn.(io.ReadWriteCloser), reader.host)
 }
 
-// Write writes data to the response body and update the
+// Write write data to the response body and update the
 // Content-Length header.
 func (resp *Response) Write(data []byte) {
 	if len(data) == 0 {
@@ -110,7 +110,7 @@ func (resp *Response) Write(data []byte) {
 	resp.writeBuff = append(resp.writeBuff, data...)
 }
 
-// WriteStatus sets the status code of the response.
+// WriteStatus set the status code of the response.
 func (resp *Response) WriteStatus(code int) {
 	status, ok := statusText[code]
 	if !ok {
@@ -118,19 +118,4 @@ func (resp *Response) WriteStatus(code int) {
 	}
 	resp.StatusCode = code
 	resp.Status = status
-}
-
-var unixDir = "/var/tmp"
-
-// UnixDir sets the dir for unix domain sockets. The default value is
-// "/var/tmp"
-func UnixDir(dir string) {
-	unixDir = dir
-}
-
-// UnixSocketFile gets the corresponding domain socket file from the host.
-// In case that unix dir is "/var/tmp/", the relation is below.
-//  "localhost:8080" --> "/var/tmp/localhost:8080"
-func UnixSocketFile(host string) string {
-	return unixDir + "/" + host
 }

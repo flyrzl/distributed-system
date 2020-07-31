@@ -40,18 +40,14 @@ func (ppt *Participant) RegisterCaller(caller Caller, name string) {
 	ppt.callerMap[name] = caller
 }
 
-// !!! NOTE
-// executeTxnPart should be mutual exclusive with abort.
 func (ppt *Participant) executeTxnPart(tp *TxnPart) {
 	ppt.txnsMu.Lock()
 	defer ppt.txnsMu.Unlock()
 	caller, ok := ppt.callerMap[tp.CallName]
-
 	if !ok {
 		panic("Invalid call: " + tp.CallName)
 	}
 	tp.errCode, tp.rollbacker = caller.Call(tp.InitRet)
-	// fmt.Println("TxnPartID:"+tp.ID+tp.CallName, tp.rollbacker)
 }
 
 // SubmitTxnPart is a RPC call, which submits the TxnPart to the participant
@@ -60,19 +56,18 @@ func (ppt *Participant) executeTxnPart(tp *TxnPart) {
 //
 // The reply could be nil.
 func (ppt *Participant) SubmitTxnPart(tp *TxnPart, reply *struct{}) error {
-	// fmt.Println("SubmitTxnPart", *tp)
-	tp.state = StateTxnPartWorking
+	// TODO
 	ppt.txnsMu.Lock()
+	tp.state = StateTxnPartWorking
 	ppt.txnsParts[tp.ID] = tp
 	ppt.txnsMu.Unlock()
 	go func() {
+		// execute txnpart
 		ppt.executeTxnPart(tp)
-		if tp.errCode != 0 {
-			// Call failed.
-			ppt.aborted(tp)
+		if tp.errCode == 0 {
+			ppt.txnpartPrepared(tp)
 		} else {
-			// Call successfully.
-			ppt.prepared(tp)
+			ppt.txnpartAborted(tp)
 		}
 	}()
 	return nil
@@ -83,17 +78,21 @@ func (ppt *Participant) SubmitTxnPart(tp *TxnPart, reply *struct{}) error {
 //
 // It will be actively invoked when the business logic
 // think the part of the transcation is ok.
-func (ppt *Participant) prepared(tp *TxnPart) {
+func (ppt *Participant) txnpartPrepared(tp *TxnPart) {
 	atomic.StoreInt32(&tp.state, StateTxnPartPrepared)
 	// assert ppt.me == tp.Shard
-	args := PreparedArgs{TxnPartIdx: tp.Idx, TxnID: tp.TxnID, ErrCode: tp.errCode}
-	var reply PreparedReply
-	var ok = false
-	for !ok {
-		c := ppt.pool.Get().(*rpc.Client)
-		ok = util.RPCPoolCall(ppt.pool, "Coordinator.InformPrepared", args, &reply)
-		ppt.pool.Put(c)
+	// TODO
+	args := &PreparedArgs{
+		TxnID:      tp.TxnID,
+		TxnPartIdx: tp.Idx,
+		ErrCode:    tp.errCode,
 	}
+	var reply PreparedReply
+	ok := false
+	for !ok {
+		ok = util.RPCPoolCall(ppt.pool, "Coordinator.InformPrepared", args, &reply)
+	}
+
 }
 
 // Aborted is the action when the participant aborts
@@ -103,8 +102,10 @@ func (ppt *Participant) prepared(tp *TxnPart) {
 // has to abort the transcation in some conditions. For
 // example, the withdraw account doesn't have enough money
 // considering transferring money between two accounts.
-func (ppt *Participant) aborted(tp *TxnPart) {
-	ppt.abort(tp)
+func (ppt *Participant) txnpartAborted(tp *TxnPart) {
+	// TODO
+	// this line seems to be unnecessary, could be deleted?
+	ppt.updateStateandRB(tp)
 	args := AbortedArgs{TxnPartIdx: tp.Idx, TxnID: tp.TxnID, ErrCode: tp.errCode}
 	var reply AbortedReply
 	var ok = false
@@ -113,14 +114,36 @@ func (ppt *Participant) aborted(tp *TxnPart) {
 	}
 }
 
+func (ppt *Participant) updateStateandRB(tp *TxnPart) {
+	atomic.StoreInt32(&tp.state, StateTxnPartAborted)
+	ppt.txnsMu.Lock()
+	defer ppt.txnsMu.Unlock()
+	if tp.canAbort == false {
+		tp.canAbort = true
+		if tp.rollbacker != nil {
+			// has executed
+			tp.rollbacker.Rollback()
+		}
+	}
+}
+
+func (ppt *Participant) deleteTxnPart(txnPartID string) *TxnPart {
+	ppt.txnsMu.Lock()
+	tp := ppt.txnsParts[txnPartID]
+	delete(ppt.txnsParts, txnPartID)
+	ppt.txnsMu.Unlock()
+	return tp
+}
+
 // Abort is a RPC call invoked by Coordinator when the coordinator decides
 // the transaction should be aborted, including timeout event or receiving
 // the Aborted msg from one or more Participants. It could be called not only
 // once.
 func (ppt *Participant) Abort(args *AbortArgs, reply *AbortReply) error {
-	tp := ppt.endTxnPart(args.TxnPartID)
+	// TODO
+	tp := ppt.deleteTxnPart(args.TxnPartID)
 	if tp != nil {
-		go ppt.abort(tp)
+		go ppt.updateStateandRB(tp)
 	}
 	return nil
 }
@@ -129,33 +152,12 @@ func (ppt *Participant) Abort(args *AbortArgs, reply *AbortReply) error {
 // all the participants have entered the Prepared state. It could be called
 // not only once.
 func (ppt *Participant) Commit(args *CommitArgs, reply *CommitReply) error {
-	tp := ppt.endTxnPart(args.TxnPartID)
+	// TODO
+	tp := ppt.deleteTxnPart(args.TxnPartID)
 	if tp != nil {
 		atomic.StoreInt32(&tp.state, StateTxnPartCommitted)
 	}
 	return nil
-}
-
-func (ppt *Participant) endTxnPart(txnPartID string) *TxnPart {
-	ppt.txnsMu.Lock()
-	tp := ppt.txnsParts[txnPartID]
-	delete(ppt.txnsParts, txnPartID)
-	ppt.txnsMu.Unlock()
-	return tp
-}
-
-// executeTxnPart should be mutual exclusive with abort.
-func (ppt *Participant) abort(tp *TxnPart) {
-	ppt.txnsMu.Lock()
-	defer ppt.txnsMu.Unlock()
-	atomic.StoreInt32(&tp.state, StateTxnPartAborted)
-	if tp.canAbort == false {
-		tp.canAbort = true
-		if tp.rollbacker != nil {
-			tp.rollbacker.Rollback()
-		}
-	}
-
 }
 
 // DefaultPptPoolSize is the maximum number of connections in the pool from the

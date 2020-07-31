@@ -9,7 +9,7 @@ which could wrap the KVStore and then enhance it.
 package tinykv
 
 import (
-	"distributed-system/kv"
+	"d-s-zl/kv"
 	"fmt"
 	"log"
 	"net"
@@ -66,6 +66,10 @@ func NewKVStoreService(network, addr string) *KVStoreService {
 
 // Serve starts the KVStore service to serve the RPC requests.
 func (ks *KVStoreService) Serve() {
+	// Don't change any of the following code,
+	// or do anything to subvert it.
+
+	// Create a thread to accept RPC connections
 	rpcs := rpc.NewServer()
 	rpcs.Register(ks)
 	l, e := net.Listen(ks.network, ks.addr)
@@ -114,6 +118,7 @@ func (ks *KVStoreService) Kill() {
 //
 // It's thread-safe and mutually exclusive with other operations.
 func (ks *KVStore) Put(key, value string) (oldValue string, existed bool) {
+	//TODO
 	now := time.Now()
 	defer func() {
 		atomic.AddInt64(&ks.costNs, time.Since(now).Nanoseconds())
@@ -132,6 +137,7 @@ func (ks *KVStore) Put(key, value string) (oldValue string, existed bool) {
 //
 // It's thread-safe and mutually exclusive with other operations.
 func (ks *KVStore) Get(key string) (value string, existed bool) {
+	//TODO
 	now := time.Now()
 	defer func() {
 		atomic.AddInt64(&ks.costNs, time.Since(now).Nanoseconds())
@@ -139,8 +145,8 @@ func (ks *KVStore) Get(key string) (value string, existed bool) {
 
 	ks.RwLock.RLock()
 	defer ks.RwLock.RUnlock()
-
 	value, existed = ks.data[key]
+
 	return
 }
 
@@ -153,26 +159,30 @@ func (ks *KVStore) Get(key string) (value string, existed bool) {
 //
 // It's thread-safe and mutually exclusive with other operations.
 func (ks *KVStore) Incr(key string, delta int) (newVal string, existed bool, err error) {
+	//TODO
 	now := time.Now()
 	defer func() {
 		atomic.AddInt64(&ks.costNs, time.Since(now).Nanoseconds())
 	}()
 
-	ks.RwLock.Lock()
-	defer ks.RwLock.Unlock()
-	var oldVal string
-	if oldVal, existed = ks.data[key]; existed {
-		var iOldVal int
-		if iOldVal, err = strconv.Atoi(oldVal); err == nil {
+	ks.RwLock.RLock()
+	defer ks.RwLock.RUnlock()
+	value, existed := ks.data[key]
+	if existed {
+		if iOldVal, err := strconv.Atoi(value); err == nil {
+			// oldvalue is numeric
 			newVal = strconv.Itoa(iOldVal + delta)
 			ks.data[key] = newVal
-			return
+			return newVal, existed, nil
+		} else {
+			// oldvalue isn't numeric
+			return newVal, existed, err
 		}
+	} else {
+		newVal = strconv.Itoa(delta)
+		ks.data[key] = newVal
 		return
 	}
-	newVal = strconv.Itoa(delta)
-	ks.data[key] = newVal
-	return
 }
 
 // Del deletes the specific key-value pair. If it exists before, the existed
@@ -180,13 +190,14 @@ func (ks *KVStore) Incr(key string, delta int) (newVal string, existed bool, err
 //
 // It's thread-safe and mutually exclusive with other operations.
 func (ks *KVStore) Del(key string) (oldValue string, existed bool) {
+	//TODO
 	now := time.Now()
 	defer func() {
 		atomic.AddInt64(&ks.costNs, time.Since(now).Nanoseconds())
 	}()
 
-	ks.RwLock.Lock()
-	defer ks.RwLock.Unlock()
+	ks.RwLock.RLock()
+	defer ks.RwLock.RUnlock()
 	if oldValue, existed = ks.data[key]; existed {
 		delete(ks.data, key)
 	}
@@ -195,24 +206,32 @@ func (ks *KVStore) Del(key string) (oldValue string, existed bool) {
 
 // RPCPut is the RPC interface for Put operation.
 func (ks *KVStore) RPCPut(args *kv.PutArgs, reply *kv.Reply) error {
+	//TODO
 	reply.Value, reply.Flag = ks.Put(args.Key, args.Value)
+
 	return nil
 }
 
 // RPCGet is the RPC interface for Get operation.
 func (ks *KVStore) RPCGet(args *kv.GetArgs, reply *kv.Reply) error {
+	//TODO
 	reply.Value, reply.Flag = ks.Get(args.Key)
+
 	return nil
 }
 
 // RPCIncr is the RPC interface for Incr operation.
 func (ks *KVStore) RPCIncr(args *kv.IncrArgs, reply *kv.Reply) (err error) {
+	//TODO
 	reply.Value, reply.Flag, err = ks.Incr(args.Key, args.Delta)
+
 	return err
 }
 
 // RPCDel is the RPC interface for Del operation.
 func (ks *KVStore) RPCDel(args *kv.DelArgs, reply *kv.Reply) (err error) {
+	//TODO
 	reply.Value, reply.Flag = ks.Del(args.Key)
+
 	return nil
 }

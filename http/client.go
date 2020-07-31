@@ -1,10 +1,13 @@
 package http
 
+//
 // Http client library.
+// Support concurrent and keep-alive (persistent) http requests.
+// Not support: chuck transfer encoding.
 
 import (
 	"bufio"
-	"distributed-system/util"
+	"d-s-zl/util"
 	"errors"
 	"fmt"
 	"io"
@@ -16,58 +19,58 @@ import (
 	"sync"
 )
 
-// Client sends the http request and recevice response. Supports concurrency
-// on multiple connections.
+// Client send the http request and recevice response.
+//
+// Supports concurrency on multiple TCP connections.
 type Client struct {
-	// Your data here.
+	// connSize    int
+	// maxConnSize int
 
-	// tcp or unix
-	Network string
-	// map: server host -> connection pool
+	// Your data here.
 	connPools *util.ResourcePoolsMap
 	mu        sync.Mutex
 	cond      sync.Cond
 }
 
-// DefaultMaxConnSizeForOne is the default max size of active connections for one
-// host.
-const DefaultMaxConnSizeForOne = 500
+// DefaultMaxConnSize is the default max size of
+// active tcp connections.
+const DefaultMaxConnSize = 500
 
-// NewClient initilize a Client with DefaultMaxConnSizeForOne.
-func NewClient(network string) *Client {
-	return NewClientSize(network, DefaultMaxConnSizeForOne)
+// Step flags for response stream processing.
+const (
+	ResponseStepStatusLine = iota
+	ResponseStepHeader
+	ResponseStepBody
+)
+
+// NewClient initilize a Client with DefaultMaxConnSize.
+func NewClient() *Client {
+	return NewClientSize(DefaultMaxConnSize)
 }
 
 // NewClientSize initilize a Client with a specific maxConnSize.
-func NewClientSize(network string, maxConnSizeForOne int) *Client {
-	if network != "unix" && network != "tcp" {
-		return nil
-	}
-	c := &Client{Network: network}
+func NewClientSize(maxConnSize int) *Client {
+	// c := &Client{maxConnSize: maxConnSize}
 
 	// Your initialization code here.
+	c := &Client{}
 	c.connPools = util.NewResourcePoolsMap(
+		// create a resource
 		func(host string) func() util.Resource {
+			// nothing.
 			return func() util.Resource {
-				if network == "tcp" {
-					conn, err := net.Dial("tcp", host)
-					if err != nil {
-						return nil
-					}
-					return conn
-				}
-				// network == "unix"
-				socketFile := UnixSocketFile(host)
-				conn, err := net.Dial("unix", socketFile)
+				// resource is a tcp conn
+				conn, err := net.Dial("tcp", host)
 				if err != nil {
 					return nil
 				}
 				return conn
 			}
-
 		},
-		maxConnSizeForOne)
+		maxConnSize,
+	)
 	c.cond = sync.Cond{L: &c.mu}
+
 	return c
 }
 
@@ -125,13 +128,6 @@ func (c *Client) Post(URL string, contentLength int64, body io.Reader) (resp *Re
 	return
 }
 
-// Step flags for response stream processing.
-const (
-	ResponseStepStatusLine = iota
-	ResponseStepHeader
-	ResponseStepBody
-)
-
 // Send http request and returns an HTTP response.
 //
 // An error is returned if caused by client policy (such as invalid
@@ -142,7 +138,7 @@ const (
 //
 // If the returned error is nil, the Response will contain a non-nil
 // Body which is the caller's responsibility to close. If the Body is
-// not closed, the Client may not be able to reuse a keep-alive
+// not closed, the Client may not be able to reuse a keep-alive TCP
 // connection to the same server.
 func (c *Client) Send(req *Request) (resp *Response, err error) {
 	if req.URL == nil {
@@ -150,24 +146,46 @@ func (c *Client) Send(req *Request) (resp *Response, err error) {
 	}
 
 	// Get a available connection to the host for HTTP communication.
-	conn := c.connPools.Get(req.URL.Host).(io.ReadWriteCloser)
+	conn, err := c.getConn(req.URL.Host)
+	if err != nil {
+		return nil, err
+	}
 
-	// Write the request to the connection stream.
+	// Write the request to the TCP stream.
 	err = c.writeReq(conn, req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		c.connPools.Clean(req.URL.Host, conn)
+		c.cleanConn(conn, req)
 		return nil, err
 	}
 
-	// Construct the response from the connection stream.
+	// Construct the response from the TCP stream.
 	resp, err = c.constructResp(conn, req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		c.connPools.Clean(req.URL.Host, conn)
-		return nil, err
+		c.cleanConn(conn, req)
 	}
 	return
+}
+
+// Put back the available connection of the specific host
+// for the future use.
+func (c *Client) putConn(conn io.ReadWriteCloser, host string) {
+	// TODO
+
+}
+
+// Get a TCP connection to the host.
+func (c *Client) getConn(host string) (conn io.ReadWriteCloser, err error) {
+	// TODO
+	return c.connPools.Get(host).(io.ReadWriteCloser), nil
+
+}
+
+// Clean one connection in the case of errors.
+func (c *Client) cleanConn(conn io.ReadWriteCloser, req *Request) {
+	// TODO
+	c.connPools.Clean(req.URL.Host, conn)
 }
 
 // Write the request to TCP stream.
@@ -177,32 +195,39 @@ func (c *Client) Send(req *Request) (resp *Response, err error) {
 func (c *Client) writeReq(conn io.Writer, req *Request) (err error) {
 	// TODO
 	writer := bufio.NewWriterSize(conn, ClientRequestBufSize)
-	reqLine := fmt.Sprintf("%s %s %s\n", req.Method, req.URL.Path, req.Proto)
+	// Write Request-Line
+	reqLine := req.Method + " " + req.URL.Path + " " + req.Proto + "\n"
 	_, err = writer.WriteString(reqLine)
 	if err != nil {
 		return err
 	}
-	for key, value := range req.Header {
-		_, err = writer.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+	// Write Headers
+	for k, v := range req.Header {
+		h := k + ": " + v + "\n"
+		_, err = writer.WriteString(h)
 		if err != nil {
 			return err
 		}
 	}
+	// Write CRLF
 	err = writer.WriteByte('\n')
 	if err != nil {
 		return err
 	}
+	// Write message-body
 	switch req.Method {
+	case MethodGet:
+		// nothing
 	case MethodPost:
 		{
-			if _, err = io.CopyN(writer, req.Body, req.ContentLength); err != nil {
+			// copy the content of req.Body to writer's buf
+			_, err = io.CopyN(writer, req.Body, req.ContentLength)
+			if err != nil {
 				return err
 			}
-
 		}
-	case MethodGet:
-		// pass
 	}
+	// write the data in the buf
 	err = writer.Flush()
 	return
 }
@@ -213,78 +238,65 @@ func (c *Client) writeReq(conn io.Writer, req *Request) (err error) {
 // Content-Length bytes.
 //
 // If TCP errors occur, err is not nil and req is nil.
-func (c *Client) constructResp(conn io.Reader, req *Request) (*Response, error) {
+func (c *Client) constructResp(conn io.Reader, req *Request) (resp *Response, err error) {
 	// TODO
-	// Receive and prase repsonse message
-	resp := &Response{Header: make(map[string]string)}
 	reader := bufio.NewReaderSize(conn, ClientResponseBufSize)
-	var wholeLine []byte
-	var lastWait = false
-	var step = ResponseStepStatusLine
-LOOP:
-	for {
-		if line, isWait, err := reader.ReadLine(); err == nil {
-			if !isWait {
-				// Complete line
-				if !lastWait {
-					wholeLine = line
-				} else {
-					wholeLine = append(wholeLine, line...)
+	resp = &Response{}
+	resp.Header = make(map[string]string)
+	step := ResponseStepStatusLine
+	finish := false
+	for !finish {
+		if line, err := reader.ReadString('\n'); err == nil {
+			// line contains '\n'
+			// line = line[:(len(line) - 1)]
+			if line[len(line)-1] == '\n' {
+				drop := 1
+				if len(line) > 1 && line[len(line)-2] == '\r' {
+					drop = 2
 				}
-				// Process the line
-				switch step {
-				case ResponseStepStatusLine:
-					{
-						statusLineWords := strings.SplitN(string(wholeLine), " ", 3)
-						resp.Proto = statusLineWords[0]
-						resp.StatusCode, err = strconv.Atoi(statusLineWords[1])
-						resp.Status = statusLineWords[2]
-						step = ResponseStepHeader
-					}
-				case ResponseStepHeader:
-					{
-						if len(line) != 0 {
-							headerWords := strings.SplitN(string(wholeLine), ": ", 2)
-							resp.Header[headerWords[0]] = headerWords[1]
+				line = line[:len(line)-drop]
+			}
+			// process the line
+			switch step {
+			case ResponseStepStatusLine:
+				{
+					// process Status-Line
+					statusLineWords := strings.SplitN(line, " ", 3)
+					resp.Proto = statusLineWords[0]
+					resp.StatusCode, err = strconv.Atoi(statusLineWords[1])
+					resp.Status = statusLineWords[2]
 
-						} else {
-							// fmt.Println(resp.Header)
-							step = ResponseStepBody
-							cLenStr, ok := resp.Header[HeaderContentLength]
-							if !ok {
-								return nil, errors.New("No Content-Length in Response header")
-							}
-							cLen, _ := strconv.ParseInt(cLenStr, 10, 64)
-							resp.ContentLength = cLen
-
-							// Transfer the body to Response
-							resp.Body = &ResponseReader{
-								c:    c,
-								conn: conn,
-								host: req.URL.Host,
-								r: &io.LimitedReader{
-									R: reader,
-									N: resp.ContentLength,
-								},
-							}
-							break LOOP
+					step = ResponseStepHeader
+				}
+			case ResponseStepHeader:
+				{
+					if len(line) != 0 {
+						// process Headers
+						headerWords := strings.SplitN(line, ": ", 2)
+						resp.Header[headerWords[0]] = headerWords[1]
+					} else {
+						// process CRLF
+						// the rest is body, process body
+						step = ResponseStepBody
+						contentLength, ok := resp.Header[HeaderContentLength]
+						if !ok {
+							return nil, errors.New("No Content-Length in Response header")
 						}
+						resp.ContentLength, _ = strconv.ParseInt(contentLength, 10, 64)
+						resp.Body = &ResponseReader{
+							c:    c,
+							conn: conn,
+							host: req.URL.Host,
+							r: &io.LimitedReader{
+								R: reader,
+								N: resp.ContentLength,
+							},
+						}
+						finish = true
+						break
 					}
-				case ResponseStepBody:
-					{
-						panic("Cannot be here")
-					}
-				}
-
-			} else {
-				// Not complete
-				if !lastWait {
-					wholeLine = line
-				} else {
-					wholeLine = append(wholeLine, line...)
 				}
 			}
-			lastWait = isWait
 		} else if err == io.EOF {
 			break
 		} else {
